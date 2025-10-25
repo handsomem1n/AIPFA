@@ -1,156 +1,203 @@
 # -*- coding: utf-8 -*-
 """
-통합 운동 피드백 시스템
-- BiLSTM으로 운동 종류 분류
-- 자세 분석 및 LLM 피드백 제공
+LLM 기반 피드백 생성 모듈
 """
 
+from openai import OpenAI
+import google.generativeai as genai
+from typing import Dict, Optional
 import os
-import cv2
-import torch
-import joblib
-import numpy as np
-import pandas as pd
-from pathlib import Path
-from typing import Dict, Tuple, Optional
-
-# 서브모듈 import
-from models.bilstm_classifier import ExerciseClassifier
-from feedback.pose_analyzer import PoseAnalyzer
-from feedback.llm_feedback import FeedbackGenerator
+import re
 
 
-class ExerciseFeedbackSystem:
-    """통합 운동 피드백 시스템"""
-    
-    def __init__(self, 
-                 model_path: str,
-                 label_encoder_path: str,
-                 openai_api_key: str,
-                 model_type: str = "gpt"):
+class FeedbackGenerator:
+    """운동별 맞춤 피드백 생성"""
+
+    def __init__(self, api_key: str, model_type: str = "gpt"):
+        self.model_type = model_type
+        if model_type.lower() == "gemini":
+            self.gemini_api_key = api_key
+            genai.configure(api_key=api_key)
+        else:
+            self.openai_client = OpenAI(api_key=api_key)
+        self.prompts_dir = os.path.join(os.path.dirname(__file__), '..', 'prompts')
+        self.prompts_cache = {}
+        self._exercise_name_map = {}  # 운동명 -> 파일명 매핑
+
+    def _get_prompt_filename(self, exercise_type: str) -> str:
         """
+        운동명을 프롬프트 파일명으로 변환
+
         Args:
-            model_path: BiLSTM 모델 경로
-            label_encoder_path: Label encoder 경로
-            openai_api_key: OpenAI API 키
-        """
-        # BiLSTM 분류기 초기화
-        self.classifier = ExerciseClassifier(model_path, label_encoder_path)
-        
-        # 자세 분석기 초기화
-        self.pose_analyzer = PoseAnalyzer()
-        
-        # LLM 피드백 생성기 초기화
-        self.feedback_generator = FeedbackGenerator(openai_api_key, model_type)
-    
-    def process_video(self,
-                     user_video_path: str,
-                     gt_video_path: Optional[str] = None,
-                     output_dir: str = "./output") -> Dict:
-        """
-        비디오 처리 및 피드백 생성
-        
-        Args:
-            user_video_path: 사용자 운동 영상 경로
-            gt_video_path: Ground truth 영상 경로 (없으면 None)
-            output_dir: 출력 디렉토리
-            
+            exercise_type: 운동 종류 (예: "squat", "lunge", "high knees")
+                          분류 모델이 반환하는 영문 소문자 형식
+
         Returns:
-            {
-                'exercise_type': str,
-                'confidence': float,
-                'feedback_video': str,
-                'feedback_text': str,
-                'json_summary': dict
-            }
+            프롬프트 파일명 (예: "squat_prompts.md", "lunge_prompts.md", "high_knees_prompts.md")
         """
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        
-        print("[1/4] 관절 데이터 추출 중...")
-        # 1. 관절 데이터 추출
-        pose_data = self.pose_analyzer.extract_landmarks(user_video_path)
-        
-        print("[2/4] 운동 종류 분류 중...")
-        # 2. BiLSTM으로 운동 종류 분류
-        exercise_type, confidence = self.classifier.predict(pose_data)
-        print(f"  -> 분류 결과: {exercise_type} (신뢰도: {confidence:.2%})")
-        
-        # 3. GT 영상 선택 (없으면 기본 GT 사용)
-        if gt_video_path is None:
-            gt_video_path = self._get_default_gt(exercise_type)
-        
-        print("[3/4] 자세 분석 및 시각화 중...")
-        print(f"  -> GT 영상: {gt_video_path}")
-        # 4. 자세 비교 및 시각화
-        feedback_video_path = os.path.join(output_dir, "feedback_video.mp4")
-        full_json_path = os.path.join(output_dir, "feedback_full.json")
-        summary_json_path = os.path.join(output_dir, "feedback_summary.json")
-        
-        self.pose_analyzer.evaluate(
-            gt_video=gt_video_path,
-            usr_video=user_video_path,
-            save_path=feedback_video_path,
-            full_json_path=full_json_path,
-            summary_json_path=summary_json_path
-        )
-        
-        print("[4/4] LLM 피드백 생성 중...")
-        # 5. LLM 피드백 생성
-        import json
-        with open(summary_json_path, 'r') as f:
-            summary_data = json.load(f)
-        
-        feedback_text = self.feedback_generator.generate_feedback(
-            exercise_type=exercise_type,
-            summary_data=summary_data,
-            orientation="front"  # 또는 "side"
-        )
-        
-        print("\n✅ 처리 완료!")
-        return {
-            'exercise_type': exercise_type,
-            'confidence': confidence,
-            'feedback_video': feedback_video_path,
-            'feedback_text': feedback_text,
-            'json_summary': summary_data
-        }
-    
-    def _get_default_gt(self, exercise_type: str) -> str:
-        """운동 종류에 맞는 기본 GT 영상 경로 반환"""
-        gt_mapping = {
-            "squat": "./data/gt_videos/squat_gt.mp4",
-            "lunge": "./data/gt_videos/lunge_gt.mp4",
-            "side_lunge": "./data/gt_videos/side_lunge_gt.mp4",
-            "situp": "./data/gt_videos/situp_gt.mp4",
-            "highknees": "./data/gt_videos/highknees_gt.mp4",
-            "bridge": "./data/gt_videos/bridge_gt.mp4",
-            "cobra_pose": "./data/gt_videos/cobra_pose_gt.mp4",
-            "jumping_jack": "./data/gt_videos/jumpingjack_gt.mp4",
-        }
-        return gt_mapping.get(exercise_type, "./data/gt_videos/default_gt.mp4")
+        # 캐시된 매핑이 있으면 사용
+        if exercise_type in self._exercise_name_map:
+            return self._exercise_name_map[exercise_type]
 
+        filename = exercise_type.lower().replace(' ', '_') + '_prompts.md'
 
-# ============= 사용 예시 =============
-if __name__ == "__main__":
-    # 시스템 초기화
-    system = ExerciseFeedbackSystem(
-        model_path="./models/model.pt",
-        label_encoder_path="./models/label_encoder.pkl",
-        openai_api_key=os.getenv("OPENAI_API_KEY", "your-api-key-here")
-    )
+        self._exercise_name_map[exercise_type] = filename
+
+        return filename
+
+    def _load_prompt_sections(self, md_file: str) -> Dict[str, str]:
+        """
+        MD 파일에서 섹션별로 프롬프트 텍스트를 로드
+
+        Args:
+            md_file: MD 파일 경로
+
+        Returns:
+            섹션명을 키로, 내용을 값으로 하는 딕셔너리
+        """
+        if md_file in self.prompts_cache:
+            return self.prompts_cache[md_file]
+
+        filepath = os.path.join(self.prompts_dir, md_file)
+        if not os.path.exists(filepath):
+            return {}
+
+        sections = {}
+        current_section = None
+        current_content = []
+
+        with open(filepath, 'r', encoding='utf-8') as f:
+            for line in f:
+                # 섹션 헤더 감지 (## section_name)
+                section_match = re.match(r'^##\s+(\w+)\s*$', line)
+                if section_match:
+                    # 이전 섹션 저장
+                    if current_section:
+                        sections[current_section] = '\n'.join(current_content).strip()
+                    # 새 섹션 시작
+                    current_section = section_match.group(1)
+                    current_content = []
+                elif current_section and not line.startswith('#'):
+                    # 섹션 내용 수집
+                    current_content.append(line.rstrip())
+
+        # 마지막 섹션 저장
+        if current_section:
+            sections[current_section] = '\n'.join(current_content).strip()
+
+        self.prompts_cache[md_file] = sections
+        return sections
     
-    # 비디오 처리
-    result = system.process_video(
-        user_video_path="./data/user_videos/user_exercise.mp4",
-        gt_video_path=None,  # None이면 자동으로 선택
-        output_dir="./output"
-    )
-    
-    # 결과 출력
-    print("\n" + "="*60)
-    print(f"운동 종류: {result['exercise_type']}")
-    print(f"신뢰도: {result['confidence']:.2%}")
-    print(f"피드백 영상: {result['feedback_video']}")
-    print("\n[피드백 내용]")
-    print(result['feedback_text'])
-    print("="*60)
+    def _build_prompt(self, summary_data: Dict, exercise: str, orientation: str) -> str:
+        """
+        범용 프롬프트 빌더 - MD 파일에서 자동으로 프롬프트 생성
+
+        Args:
+            summary_data: 자세 분석 결과
+            exercise: 운동 종류
+            orientation: 촬영 방향 (front/side)
+
+        Returns:
+            생성된 프롬프트
+        """
+        summary = summary_data["summary"]
+        avg_scores = summary_data["average_joint_scores"]
+
+        # 운동 종류에 맞는 프롬프트 파일명 가져오기
+        prompt_filename = self._get_prompt_filename(exercise)
+
+        # MD 파일에서 프롬프트 섹션 로드
+        sections = self._load_prompt_sections(prompt_filename)
+
+        # 프롬프트 파일이 없으면 기본 프롬프트 사용
+        if not sections:
+            sections = self._load_prompt_sections('default_prompts.md')
+
+        # orientation에 따라 적절한 설명 선택
+        orientation_key = f"{orientation}_orientation"
+        orientation_desc = sections.get(orientation_key, '')
+
+        # 기본 프롬프트 구조 생성
+        prompt_parts = [
+            f"너는 운동 코치 AI야. 아래는 사용자의 {exercise} 동작 평가 결과야.",
+            "JSON 데이터를 보고, 사용자가 이해할 수 있게 피드백을 해줘.",
+            ""
+        ]
+
+        # 운동 설명 추가
+        if sections.get('exercise_description'):
+            prompt_parts.append(f"** {exercise}에 대한 설명")
+            prompt_parts.append(sections.get('exercise_description', ''))
+            prompt_parts.append("")
+
+        # orientation 설명 추가
+        if orientation_desc:
+            prompt_parts.append(orientation_desc)
+            prompt_parts.append("")
+
+        # 관절 설명 추가
+        if sections.get('joint_descriptions'):
+            prompt_parts.append(sections.get('joint_descriptions', ''))
+            prompt_parts.append("")
+
+        # 관절 점수 해석 규칙 추가 (있는 경우)
+        if sections.get('joint_score_interpretation'):
+            prompt_parts.append(sections.get('joint_score_interpretation', ''))
+            prompt_parts.append("")
+
+        # 평가 기준 추가
+        if sections.get('evaluation_criteria'):
+            prompt_parts.append(sections.get('evaluation_criteria', ''))
+            prompt_parts.append("")
+
+        # 결과 요약
+        prompt_parts.append("# 결과 요약:")
+        prompt_parts.append(f"라벨 비율 = {summary}")
+        prompt_parts.append(f"평균 관절 점수 = {avg_scores}")
+        prompt_parts.append("")
+
+        # 출력 지침 추가
+        if sections.get('output_guidelines'):
+            # {orientation} 같은 플레이스홀더 치환
+            output_guidelines = sections.get('output_guidelines', '')
+            output_guidelines = output_guidelines.replace('{orientation}', orientation)
+            output_guidelines = output_guidelines.replace('{exercise}', exercise)
+            prompt_parts.append(output_guidelines)
+
+        return '\n'.join(prompt_parts)
+
+    def generate_feedback(self,
+                         exercise_type: str,
+                         summary_data: Dict,
+                         orientation: str = "front") -> str:
+        """
+        운동 종류와 분석 데이터로 피드백 생성
+
+        Args:
+            exercise_type: 운동 종류 (예: "런지", "사이드 런지", "하이니즈" 등)
+            summary_data: 자세 분석 결과 (JSON)
+            orientation: 촬영 방향 (front/side)
+            model_type: 사용할 LLM 모델 ("gpt" 또는 "gemini", 기본값: "gpt")
+
+        Returns:
+            피드백 텍스트
+        """
+        # 범용 프롬프트 빌더 사용
+        prompt = self._build_prompt(summary_data, exercise_type, orientation)
+
+        if self.model_type.lower() == "gemini":
+            # Gemini 사용
+            if not self.gemini_api_key:
+                raise ValueError("Gemini API key가 설정되지 않았습니다. FeedbackGenerator 초기화 시 gemini_api_key를 제공해주세요.")
+
+            model = genai.GenerativeModel('gemini-2.5-pro')
+            response = model.generate_content(prompt)
+            return response.text
+        else:
+            # GPT 사용 (기본값)
+            response = self.openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7
+            )
+            return response.choices[0].message.content
