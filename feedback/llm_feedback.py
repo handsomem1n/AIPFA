@@ -13,11 +13,13 @@ import re
 class FeedbackGenerator:
     """운동별 맞춤 피드백 생성"""
 
-    def __init__(self, api_key: str, gemini_api_key: Optional[str] = None):
-        self.openai_client = OpenAI(api_key=api_key)
-        self.gemini_api_key = gemini_api_key
-        if gemini_api_key:
-            genai.configure(api_key=gemini_api_key)
+    def __init__(self, api_key: str, model_type: str = "gpt"):
+        self.model_type = model_type
+        if model_type.lower() == "gemini":
+            self.gemini_api_key = api_key
+            genai.configure(api_key=api_key)
+        else:
+            self.openai_client = OpenAI(api_key=api_key)
         self.prompts_dir = os.path.join(os.path.dirname(__file__), '..', 'prompts')
         self.prompts_cache = {}
         self._exercise_name_map = {}  # 운동명 -> 파일명 매핑
@@ -167,7 +169,7 @@ class FeedbackGenerator:
     def generate_feedback(self,
                          exercise_type: str,
                          summary_data: Dict,
-                         orientation: str = "front",) -> str:
+                         orientation: str = "front") -> str:
         """
         운동 종류와 분석 데이터로 피드백 생성
 
@@ -183,9 +185,19 @@ class FeedbackGenerator:
         # 범용 프롬프트 빌더 사용
         prompt = self._build_prompt(summary_data, exercise_type, orientation)
 
-        response = self.openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7
-        )
-        return response.choices[0].message.content
+        if self.model_type.lower() == "gemini":
+            # Gemini 사용
+            if not self.gemini_api_key:
+                raise ValueError("Gemini API key가 설정되지 않았습니다. FeedbackGenerator 초기화 시 gemini_api_key를 제공해주세요.")
+
+            model = genai.GenerativeModel('gemini-2.5-pro')
+            response = model.generate_content(prompt)
+            return response.text
+        else:
+            # GPT 사용 (기본값)
+            response = self.openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7
+            )
+            return response.choices[0].message.content
