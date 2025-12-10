@@ -52,6 +52,9 @@ output/**/*.json
 # OS
 .DS_Store
 Thumbs.db
+# macOS resource fork files
+._*
+.__*
 
 # Jupyter
 .ipynb_checkpoints/
