@@ -308,7 +308,7 @@ class PoseAnalyzer:
             cv2.putText(left, f"GT idx={i}", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,0), 2)
             cv2.putText(right, f"USR idx={j}", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,0), 2)
             cv2.putText(right, f"{label} score={final_score:.2f}", (10,70),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,0,0), 2)
+            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,0,0), 2)
             
             right_resized = cv2.resize(right, (W, H))
             out.write(np.hstack([left, right_resized]))
